@@ -501,18 +501,23 @@ async def start_simulation(duration: float = 100):
             loop.close()
 
         current_simulation = ProductionLineSimulation(callback=sync_callback)
-        stats = current_simulation.run(until=duration)
+        try:
+            stats = current_simulation.run(until=duration)
+        finally:
+            simulation_running = False
 
-        simulation_running = False
+            message_type = "simulation_completed"
+            if current_simulation.stopped_early:
+                message_type = "simulation_stopped"
 
-        # 发送仿真完成消息
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(manager.broadcast({
-            "type": "simulation_completed",
-            "data": stats
-        }))
-        loop.close()
+            # 发送仿真完成/停止消息
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(manager.broadcast({
+                "type": message_type,
+                "data": stats
+            }))
+            loop.close()
 
     thread = threading.Thread(target=run_simulation, daemon=True)
     thread.start()
@@ -523,9 +528,13 @@ async def start_simulation(duration: float = 100):
 @app.post("/api/simulation/stop")
 async def stop_simulation():
     """停止仿真"""
-    global simulation_running
-    simulation_running = False
-    return {"status": "Simulation stopped"}
+    global simulation_running, current_simulation
+
+    if not simulation_running or current_simulation is None:
+        return {"status": "Simulation is not running"}
+
+    current_simulation.request_stop()
+    return {"status": "Stop requested"}
 
 
 @app.websocket("/ws")
