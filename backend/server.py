@@ -9,12 +9,29 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import asyncio
 import json
+import contextlib
 from typing import List, Dict
 import threading
 import os
 from simulation import ProductionLineSimulation
 
-app = FastAPI(title="SimPy-OpenLayers Production Simulation")
+
+# Dedicated event loop for callbacks running in a background thread
+callback_loop: asyncio.AbstractEventLoop = None
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manages the startup and shutdown of the background event loop."""
+    global callback_loop
+    callback_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=callback_loop.run_forever, daemon=True)
+    thread.start()
+    yield
+    callback_loop.call_soon_threadsafe(callback_loop.stop)
+
+
+app = FastAPI(title="SimPy-OpenLayers Production Simulation", lifespan=lifespan)
 
 # 获取项目根目录
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -494,30 +511,26 @@ async def start_simulation(duration: float = 100):
         global simulation_running, current_simulation
 
         def sync_callback(event):
-            # 创建新的事件循环来处理异步回调
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(event_callback(event))
-            loop.close()
+            """Thread-safe callback to run the async event_callback in the dedicated loop."""
+            asyncio.run_coroutine_threadsafe(event_callback(event), callback_loop)
 
         current_simulation = ProductionLineSimulation(callback=sync_callback)
         try:
             stats = current_simulation.run(until=duration)
         finally:
             simulation_running = False
-
             message_type = "simulation_completed"
             if current_simulation.stopped_early:
                 message_type = "simulation_stopped"
 
-            # 发送仿真完成/停止消息
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(manager.broadcast({
-                "type": message_type,
-                "data": stats
-            }))
-            loop.close()
+            # Schedule the final broadcast in the callback loop
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast({
+                    "type": message_type,
+                    "data": stats
+                }),
+                callback_loop
+            )
 
     thread = threading.Thread(target=run_simulation, daemon=True)
     thread.start()
