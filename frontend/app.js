@@ -219,7 +219,9 @@ async function loadWorkshopLayout() {
 
 // WebSocket连接
 function connectWebSocket() {
-    const wsUrl = `ws://${window.location.hostname}:8000/ws`;
+    // 自动适配协议：HTTPS使用wss://，HTTP使用ws://
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
