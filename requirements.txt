@@ -1,0 +1,17 @@
+# SimPy-OpenLayers Production Line Simulation System
+# Python Dependencies
+
+# Core Simulation
+simpy==4.1.1
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+websockets==12.0
+
+# Data Processing
+pydantic==2.5.3
+python-multipart==0.0.6
+
+# Additional utilities
+aiofiles==23.2.1
