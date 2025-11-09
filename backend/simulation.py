@@ -4,6 +4,7 @@
 """
 
 import simpy
+import simpy.core
 import random
 import json
 from typing import List, Dict, Any
@@ -21,6 +22,13 @@ class ProductionLineSimulation:
         self.env = simpy.Environment()
         self.callback = callback
         self.event_log = []
+
+        # 停止控制
+        self.stop_requested = False
+        self.stop_event = None
+        self.stopped_early = False
+        self._pre_run_stop_requested = False
+        self._aborted_parts = set()
 
         # 仿真参数
         self.num_workstations = 9
@@ -107,8 +115,13 @@ class ProductionLineSimulation:
     def part_generator(self):
         """物料生成器"""
         while True:
+            if self.stop_requested:
+                break
             # 等待到达间隔
             yield self.env.timeout(random.expovariate(1.0 / self.arrival_interval))
+
+            if self.stop_requested:
+                break
 
             # 创建新物料
             self.part_counter += 1
@@ -142,6 +155,9 @@ class ProductionLineSimulation:
         ]
 
         for stage_name, buffer_before, buffer_after in process_stages:
+            if self.stop_requested:
+                self._handle_part_abort(part_id)
+                return
             # 如果需要从缓冲区取料
             if buffer_before is not None:
                 # 记录在缓冲区等待
@@ -154,6 +170,9 @@ class ProductionLineSimulation:
 
                 # 从缓冲区取料
                 yield self.buffers[buffer_before].get(1)
+                if self.stop_requested:
+                    self._handle_part_abort(part_id)
+                    return
                 self.stats['buffer_level'][buffer_before] = self.buffers[buffer_before].level
 
             # 从该阶段的可选工位中随机选择一个
@@ -172,6 +191,10 @@ class ProductionLineSimulation:
 
             with self.workstations[workstation_id].request() as req:
                 yield req
+
+                if self.stop_requested:
+                    self._handle_part_abort(part_id)
+                    return
 
                 queue_time = self.env.now - queue_start
                 self.stats['queue_time'].append(queue_time)
@@ -197,6 +220,10 @@ class ProductionLineSimulation:
                 # 加工过程
                 yield self.env.timeout(processing_time)
 
+                if self.stop_requested:
+                    self._handle_part_abort(part_id)
+                    return
+
                 # 记录完成加工
                 self.log_event('part_completed_station', {
                     'part_id': part_id,
@@ -208,6 +235,9 @@ class ProductionLineSimulation:
             # 如果需要放入缓冲区
             if buffer_after is not None:
                 yield self.buffers[buffer_after].put(1)
+                if self.stop_requested:
+                    self._handle_part_abort(part_id)
+                    return
                 self.stats['buffer_level'][buffer_after] = self.buffers[buffer_after].level
 
                 self.log_event('part_in_buffer', {
@@ -224,6 +254,9 @@ class ProductionLineSimulation:
         self.stats['produced'] += 1
         self.stats['in_system'] -= 1
 
+        if part_id in self._aborted_parts:
+            self._aborted_parts.remove(part_id)
+
         self.log_event('part_finished', {
             'part_id': part_id,
             'position': [115, 20],  # 成品区（调整坐标）
@@ -233,14 +266,60 @@ class ProductionLineSimulation:
 
     def run(self, until: float = 100):
         """运行仿真"""
+        self.stopped_early = False
+        self.stop_event = self.env.event()
+
+        if self._pre_run_stop_requested:
+            self.stop_requested = True
+            self.stop_event.succeed()
+            self._pre_run_stop_requested = False
+        else:
+            self.stop_requested = False
+
+        # 启动停止监视器
+        self.env.process(self._stop_monitor())
+
         # 启动物料生成器
         self.env.process(self.part_generator())
 
         # 运行仿真
-        self.env.run(until=until)
+        try:
+            self.env.run(until=until)
+        except simpy.core.StopSimulation:
+            pass
+        finally:
+            self.stop_event = None
 
         # 计算最终统计数据
         return self.get_statistics()
+
+    def _stop_monitor(self):
+        """监听停止事件并终止仿真"""
+        yield self.stop_event
+        self.stopped_early = True
+        raise simpy.core.StopSimulation("Stop requested")
+
+    def request_stop(self):
+        """请求停止仿真"""
+        self.stop_requested = True
+        if self.stop_event is not None and not self.stop_event.triggered:
+            self.stop_event.succeed()
+        else:
+            self._pre_run_stop_requested = True
+
+    def _handle_part_abort(self, part_id: str):
+        """标记物料在停止时被中断"""
+        if part_id in self._aborted_parts:
+            return
+
+        self._aborted_parts.add(part_id)
+        if self.stats['in_system'] > 0:
+            self.stats['in_system'] -= 1
+
+        self.log_event('part_aborted', {
+            'part_id': part_id,
+            'status': 'aborted'
+        })
 
     def get_statistics(self) -> Dict[str, Any]:
         """获取统计数据"""
